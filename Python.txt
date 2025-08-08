@@ -1,0 +1,133 @@
+==== MapReduce using Python ====
+
+1) Create workspace for Python
+mkdir -p ~/workspace/python
+cd ~/workspace/python
+
+2) Create mapper script
+nano mapper.py
+
+----- paste into the editor, save & exit (Ctrl+X, Y, Enter) -----
+import sys
+
+for line in sys.stdin:
+    if line.startswith("event_time"):
+        continue
+    parts = line.strip().split(",")
+    if len(parts) < 7:
+        continue
+    event_type = parts[1].strip().lower()
+    product_id = parts[2].strip()
+    try:
+        price = float(parts[6])
+    except:
+        continue
+
+    if event_type == "view":
+        print(f"{product_id}_view\t1")
+    elif event_type == "purchase":
+        print(f"{product_id}_purchase\t1")
+        print(f"{product_id}_revenue\t{price}")
+---------------------- end of mapper script ----------------------
+
+2) Create reducer script
+nano reducer.py
+
+----- paste into the editor, save & exit (Ctrl+X, Y, Enter) -----
+import sys
+
+current_key = None
+total = 0
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line or '\t' not in line:
+        continue
+
+    key, value = line.split('\t')
+    try:
+        value = float(value)
+    except:
+        continue
+
+    if key == current_key:
+        total += value
+    else:
+        if current_key:
+            print(f"{current_key}\t{round(total, 2)}")
+        current_key = key
+        total = value
+
+if current_key:
+    print(f"{current_key}\t{round(total, 2)}")
+---------------------- end of reducer script ----------------------
+
+3) Run MapReduce Job
+hadoop jar /home/hadoop/hadoop-3.2.2/share/hadoop/tools/lib/hadoop-streaming-3.2.2.jar \
+  -input /input/ecom/2019-Nov.csv \
+  -output /output/ecom \
+  -mapper "python3 mapper.py" \
+  -reducer "python3 reducer.py" \
+  -file mapper.py \
+  -file reducer.py
+
+4) Confirm MapReduce output
+hdfs dfs -cat /output/ecom/part-00000 > result.txt
+less result.txt
+
+5) Create script for getting result
+nano filter_low_conversion.py
+
+----- paste into the editor, save & exit (Ctrl+X, Y, Enter) -----
+results = {}
+
+with open("result.txt", "r") as f:
+    for line in f:
+        if "\t" not in line:
+            continue
+        key, value = line.strip().split("\t")
+        if "_" not in key:
+            continue
+        product_id, metric = key.rsplit("_", 1)
+        try:
+            value = float(value)
+        except:
+            continue
+        if product_id not in results:
+            results[product_id] = {"view": 0, "purchase": 0, "revenue": 0}
+        results[product_id][metric] = value
+
+# Collect filtered entries
+filtered = []
+
+for pid, stats in results.items():
+    views = stats["view"]
+    purchases = stats["purchase"]
+    revenue = stats["revenue"]
+    if views == 0:
+        continue
+    rate = (purchases / views) * 100
+    if rate < 5 and revenue > 1000:
+        filtered.append((pid, int(views), int(purchases), round(rate, 2), round(revenue, 2)))
+
+# Sort by highest revenue (index 4)
+filtered.sort(key=lambda x: x[4], reverse=True)
+
+# Write sorted results
+with open("python_output.csv", "w") as out:
+    out.write("ProductID,Views,Purchases,ConversionRate(%),Revenue\n")
+    for row in filtered:
+        out.write(f"{row[0]},{row[1]},{row[2]},{row[3]},{row[4]}\n")
+
+print("✅ Sorted by revenue: python_output.csv generated.")
+---------------------- end of script ----------------------
+
+6) Run the script to get result
+python3 filter_low_conversion.py
+
+7) Confirm local filtered output
+ls -lh ~/workspace/python/python_output.csv
+head ~/workspace/python/python_output.csv
+
+8) Upload filtered output to bucket(S3)
+aws s3 cp ~/workspace/python/python_output.csv s3://ecomanalysisbucket3134/

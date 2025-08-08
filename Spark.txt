@@ -1,0 +1,76 @@
+==== Non-MapReduce using Spark ====
+
+1) Create workspace for Spark
+mkdir -p ~/workspace/spark
+cd ~/workspace/spark
+
+2) Create the PySpark script
+nano spark.py
+
+----- paste into the editor, save & exit (Ctrl+X, Y, Enter) -----
+import time
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, round, sum as _sum, when
+
+spark = SparkSession.builder.appName("LowConversionHighRevenue").getOrCreate()
+
+# Read dataset from HDFS
+df = spark.read.csv("hdfs:///input/ecom/2019-Nov.csv", header=True, inferSchema=True)
+
+# Build metrics per row
+agg_df = df.withColumn(
+    "is_view", when(col("event_type") == "view", 1).otherwise(0)
+).withColumn(
+    "is_purchase", when(col("event_type") == "purchase", 1).otherwise(0)
+).withColumn(
+    "revenue", when(col("event_type") == "purchase", col("price")).otherwise(0.0)
+)
+
+# Aggregate by product
+grouped = agg_df.groupBy("product_id").agg(
+    _sum("is_view").alias("views"),
+    _sum("is_purchase").alias("purchases"),
+    _sum("revenue").alias("revenue")
+)
+
+# Compute conversion rate and apply thresholds
+result = grouped.withColumn(
+    "conversion_rate", (col("purchases") / col("views")) * 100
+)
+filtered = result.filter(
+    (col("conversion_rate") < 5) & (col("revenue") > 1000)
+)
+
+# TIME the final select + orderBy + write (uncached)
+start = time.time()
+result_to_save = filtered.select(
+    "product_id",
+    col("views").cast("int"),
+    col("purchases").cast("int"),
+    round(col("conversion_rate"), 2).alias("conversion_rate(%)"),
+    round(col("revenue"), 2).alias("revenue")
+).orderBy(col("revenue").desc())
+
+# Write result to HDFS
+result_to_save.coalesce(1).write.csv(
+    "hdfs:///output/low_conversion_high_revenue",
+    header=True,
+    mode="overwrite"
+)
+end = time.time()
+print("Spark runtime (uncached, seconds):", end - start)
+
+---------------------- end of PySpark script ----------------------
+
+3) Run the PySpark script
+spark-submit spark.py
+
+4) Confirm output in HDFS
+hdfs dfs -ls /output/low_conversion_high_revenue
+
+# Result checking (REPLACE * exactly same with the printed out file name)
+hdfs dfs -cat /output/low_conversion_high_revenue/part-00000-*.csv | head
+
+5) Pull the result to local workspace and upload to bucket(S3)
+hdfs dfs -get /output/low_conversion_high_revenue/part-00000-*.csv ~/workspace/spark_output.csv
+aws s3 cp ~/workspace/spark_output.csv s3://ecomanalysisbucket3134/

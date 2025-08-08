@@ -1,0 +1,228 @@
+==== MapReduce using Java ====
+
+1) Create workspace for Java
+mkdir -p ~/workspace/java
+cd ~/workspace/java
+
+2) Create mapper script
+nano EcomMapper.java
+
+----- paste into the editor, save & exit (Ctrl+X, Y, Enter) -----
+import java.io.IOException;
+import org.apache.hadoop.io.*;
+import org.apache.hadoop.mapreduce.Mapper;
+
+public class EcomMapper extends Mapper<LongWritable, Text, Text, FloatWritable> {
+    private Text outKey = new Text();
+    private FloatWritable outValue = new FloatWritable();
+
+    public void map(LongWritable key, Text value, Context context) throws IOException, InterruptedException {
+        String line = value.toString();
+
+        if (line.startsWith("event_time")) return;
+
+        String[] parts = line.split(",");
+        if (parts.length < 7) return;
+
+        String eventType = parts[1].trim().toLowerCase();
+        String productId = parts[2].trim();
+        String priceStr = parts[6].trim();
+
+        try {
+            float price = Float.parseFloat(priceStr);
+
+            if (eventType.equals("view")) {
+                outKey.set(productId + "_view");
+                outValue.set(1);
+                context.write(outKey, outValue);
+            } else if (eventType.equals("purchase")) {
+                outKey.set(productId + "_purchase");
+                outValue.set(1);
+                context.write(outKey, outValue);
+
+                outKey.set(productId + "_revenue");
+                outValue.set(price);
+                context.write(outKey, outValue);
+            }
+        } catch (Exception e) {
+            // Skip bad data
+        }
+    }
+}
+---------------------- end of mapper script ----------------------
+
+2) Create reducer script
+nano EcomReducer.java
+
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+import org.apache.hadoop.io.*;
+import org.apache.hadoop.mapreduce.Reducer;
+
+public class EcomReducer extends Reducer<Text, FloatWritable, Text, Text> {
+
+    // Temporary storage to combine all metrics per product
+    private Map<String, float[]> productMap = new HashMap<>();
+
+    public void reduce(Text key, Iterable<FloatWritable> values, Context context) {
+        try {
+            String[] parts = key.toString().split("_");
+            if (parts.length != 2) return;
+
+            String productId = parts[0];
+            String metric = parts[1];
+
+            float sum = 0;
+            for (FloatWritable val : values) {
+                sum += val.get();
+            }
+
+            float[] stats = productMap.getOrDefault(productId, new float[3]);
+            if (metric.equals("view")) stats[0] += sum;
+            else if (metric.equals("purchase")) stats[1] += sum;
+            else if (metric.equals("revenue")) stats[2] += sum;
+            productMap.put(productId, stats);
+        } catch (Exception e) {
+            // Handle parsing error
+        }
+    }
+
+    @Override
+    protected void cleanup(Context context) throws IOException, InterruptedException {
+        for (Map.Entry<String, float[]> entry : productMap.entrySet()) {
+            String productId = entry.getKey();
+            float views = entry.getValue()[0];
+            float purchases = entry.getValue()[1];
+            float revenue = entry.getValue()[2];
+
+            if (views == 0) continue;
+            float conversionRate = (purchases / views) * 100;
+
+            if (conversionRate < 5 && revenue > 1000) {
+                context.write(new Text(productId),
+                    new Text("Views=" + (int) views + ", Purchases=" + (int) purchases +
+                             ", ConversionRate=" + String.format("%.2f", conversionRate) +
+                             "%, Revenue=RM" + String.format("%.2f", revenue)));
+            }
+        }
+    }
+}
+---------------------- end of reducer script ----------------------
+
+3) Create product analytics script
+nano ProductAnalytics.java 
+
+----- paste into the editor, save & exit (Ctrl+X, Y, Enter) -----
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.*;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+
+public class ProductAnalytics {
+    public static void main(String[] args) throws Exception {
+        Configuration conf = new Configuration();
+        Job job = Job.getInstance(conf, "Low Conversion High Revenue");
+
+        job.setJarByClass(ProductAnalytics.class);
+        job.setMapperClass(EcomMapper.class);
+        job.setReducerClass(EcomReducer.class);
+
+        job.setMapOutputKeyClass(Text.class);
+        job.setMapOutputValueClass(FloatWritable.class);
+
+        job.setOutputKeyClass(Text.class);
+        job.setOutputValueClass(Text.class);
+
+        FileInputFormat.setInputPaths(job, new Path(args[0]));
+        FileOutputFormat.setOutputPath(job, new Path(args[1]));
+
+        System.exit(job.waitForCompletion(true) ? 0 : 1);
+    }
+}
+---------------------- end of script ----------------------
+
+6) Run MapReduce Job
+javac -classpath `hadoop classpath` -d . *.java
+
+jar cf productanalytics.jar *.class
+
+hadoop jar productanalytics.jar ProductAnalytics /input/ecom/2019-Nov.csv /output/ecom-java
+
+7) Confirm MapReduce output
+hadoop fs -cat /output/ecom-java/part-r-00000 > result_java.txt
+less result_java.txt
+
+5) Create script for sorting the result
+nano SortResultToCSV.java
+
+----- paste into the editor, save & exit (Ctrl+X, Y, Enter) -----
+import java.io.*;
+import java.util.*;
+
+public class SortResultToCSV {
+
+    public static void main(String[] args) {
+        String inputFile = "result_java.txt";
+        String outputFile = "java_output.csv";
+
+        List<String[]> rows = new ArrayList<>();
+
+        try (BufferedReader br = new BufferedReader(new FileReader(inputFile))) {
+            String line;
+
+            while ((line = br.readLine()) != null) {
+                String[] parts = line.split("\t");
+                if (parts.length != 2) continue;
+
+                String productId = parts[0];
+                String[] metrics = parts[1].replace(" ", "").split(",");
+
+                try {
+                    int views = Integer.parseInt(metrics[0].split("=")[1]);
+                    int purchases = Integer.parseInt(metrics[1].split("=")[1]);
+                    float conversionRate = Float.parseFloat(metrics[2].split("=")[1].replace("%", ""));
+                    float revenue = Float.parseFloat(metrics[3].split("=")[1].replace("RM", ""));
+
+                    // Filter condition
+                    if (conversionRate < 5 && revenue > 1000) {
+                        rows.add(new String[] {
+                            productId, String.valueOf(views), String.valueOf(purchases),
+                            String.format("%.2f", conversionRate), String.format("%.2f", revenue)
+                        });
+                    }
+
+                } catch (Exception e) {
+                    // Skip malformed line
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        // Sort by revenue descending (column index 4)
+        rows.sort((a, b) -> Float.compare(Float.parseFloat(b[4]), Float.parseFloat(a[4])));
+
+        // Write to CSV
+        try (PrintWriter pw = new PrintWriter(new FileWriter(outputFile))) {
+            pw.println("ProductID,Views,Purchases,ConversionRate(%),Revenue(RM)");
+            for (String[] row : rows) {
+                pw.println(String.join(",", row));
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        System.out.println("✅ Sorted CSV written to: " + outputFile);
+    }
+}
+---------------------- end of script ----------------------
+
+6) Run the script to get result
+javac SortResultToCSV.java
+java SortResultToCSV
+
+7) Upload sorted output to bucket(S3)
+aws s3 cp ~/workspace/java/java_output.csv s3://ecomanalysisbucket3134/

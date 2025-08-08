@@ -1,0 +1,22 @@
+==== HDFS Environment Preparation ====
+
+1) Prepare hadoop cluster and workspace
+sudo su - hadoop
+mkdir -p ~/workspace
+cd ~/workspace
+
+# Upload dataset from bucket(S3) into EMR
+aws s3 cp s3://ecomanalysisbucket3134/2019-Nov.csv .
+
+2) Put the dataset into HDFS
+# Make sure HDFS is running
+start-dfs.sh
+
+# Turn off safemode if active
+hdfs dfsadmin -safemode leave
+
+# Create a directory in HDFS
+hdfs dfs -mkdir -p /input/ecom
+
+# Upload the dataset from workspace to HDFS
+hdfs dfs -put -f ~/workspace/2019-Nov.csv /input/ecom/

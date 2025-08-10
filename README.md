@@ -34,4 +34,4 @@ Source: [Kaggle – E-Commerce Behavior Data from Multi-Category Store](https://
 |----------------|---------------|--------------|
 | Python         | MapReduce     | 4 min 43 sec |
 | Java           | MapReduce     | 3 min 50 sec |
-| Spark          | Non-MapReduce | 1 min 49 sec |
+| Spark          | Non-MapReduce | 1 min 31 sec |
